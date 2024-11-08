@@ -30,6 +30,7 @@ use aws_sdk_dynamodb::{
     Client as DynamoDbSdkClient,
 };
 use log::{debug, error};
+use regex::Regex;
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use tabwriter::TabWriter;
@@ -1096,6 +1097,7 @@ fn convert_item_to_csv_line(
     keys_only: bool,
 ) -> String {
     let mut line = String::new();
+    let re_json_str = Regex::new(r#"^"?[\[{]"#).unwrap();
 
     // push pk value to the line
     let pk_attrval: &AttributeValue = item
@@ -1105,7 +1107,7 @@ fn convert_item_to_csv_line(
         .1;
     // NOTE: Another possible implementation to generate string from attrval would be: `&attrval_to_cell_print(Some(pk_attrval.to_owned())))`.
     //       However, `attrval_to_cell_print` doesn't surround String value with double-quotes (""), so I prefer using attrval_to_jsonval here.
-    line.push_str(&attrval_to_jsonval(pk_attrval).to_string());
+    line.push_str(&attrval_to_csvval(&re_json_str, pk_attrval, true).to_string());
 
     // push sk value to the line, if needed.
     if let Some(sk) = &ts.sk {
@@ -1115,7 +1117,7 @@ fn convert_item_to_csv_line(
             .expect("sk should exist in an item")
             .1;
         line.push(',');
-        line.push_str(&attrval_to_jsonval(sk_attrval).to_string());
+        line.push_str(&attrval_to_csvval(&re_json_str, sk_attrval, true).to_string());
     }
 
     if keys_only {
@@ -1127,7 +1129,7 @@ fn convert_item_to_csv_line(
             };
             line.push(',');
             // NOTE: If special handling for complex data type is needed: `if let Some(_) = attrval.m {...`
-            line.push_str(&attrval_to_jsonval(attrval).to_string());
+            line.push_str(&attrval_to_csvval(&re_json_str, attrval, true).to_string());
         }
     }
 
@@ -1158,6 +1160,67 @@ fn str_to_json_num(s: &str) -> JsonValue {
                 s, e
             ),
         },
+    }
+}
+
+fn attrval_to_csvval(re: &Regex, attrval: &AttributeValue, add_dq: bool) -> String {
+    let unsupported: &str = "<<<CSV output doesn't support this type attributes>>>";
+    //  following list of if-else statements would be return value of this function.
+    match attrval {
+        AttributeValue::S(v) => {
+            let mut result = v.to_string();
+            if re.is_match(v) {
+                result = result.replace("\"", "\"\"");
+            }
+            if add_dq {
+                result.insert(0, '"');
+                result.push('"');
+            }
+            result
+        },
+        AttributeValue::N(v) => str_to_json_num(v).to_string(),
+        AttributeValue::Bool(v) => serde_json::to_value(v).unwrap().to_string(),
+        AttributeValue::Null(_) => serde_json::to_value(()).unwrap().to_string(),
+        AttributeValue::Ss(v) => serde_json::to_value(v).unwrap().to_string(),
+        AttributeValue::Ns(v) =>
+            v.iter().map(|v| str_to_json_num(v).to_string()).collect(),
+        AttributeValue::B(_) | AttributeValue::Bs(_) => String::from(unsupported),
+        AttributeValue::M(map) => {
+            let mut result = String::from("{");
+            let mut idx = map.len();
+            for (k, v) in map {
+                debug!("working on key '{}', and value '{:?}'", k, v);
+                idx -= 1;
+                result.push_str("\"\"");
+                result.push_str(k);
+                match v {
+                    AttributeValue::M(_) => {
+                        result.push_str("\"\":");
+                        result.push_str(attrval_to_csvval(re, v, false).as_str());
+                    }
+                    _ => {
+                        result.push_str("\"\":\"");
+                        result.push_str(attrval_to_csvval(re, v, true).as_str());
+                        result.push('"');
+                    }
+                }
+                if idx > 0 {
+                    result.push(',');
+                }
+            }
+            result.push_str("}");
+            if add_dq {
+                result.insert(0, '"');
+                result.push('"');
+            }
+            result
+        },
+        AttributeValue::L(v) =>
+            v.iter().map(|v| attrval_to_csvval(re, v, add_dq)).collect(),
+        _ => panic!(
+            "DynamoDB AttributeValue is not in valid status: {:#?}",
+            &attrval
+        ),
     }
 }
 

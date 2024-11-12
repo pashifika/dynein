@@ -1188,7 +1188,9 @@ fn attrval_to_csvval(re: &Regex, attrval: &AttributeValue, add_dq: bool) -> Stri
         AttributeValue::M(map) => {
             let mut result = String::from("{");
             let mut idx = map.len();
-            for (k, v) in map {
+            let mut vec: Vec<(&String, &AttributeValue)> = map.iter().collect();
+            vec.sort_by(|a, b| a.0.cmp(&b.0));
+            for (k, v) in vec {
                 debug!("working on key '{}', and value '{:?}'", k, v);
                 idx -= 1;
                 result.push_str("\"\"");
